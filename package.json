@@ -1,0 +1,24 @@
+{
+  "name": "session-simplex-bridge",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Receive Session messages in SimpleX (e.g. on a hidden profile) and reply from there.",
+  "type": "module",
+  "scripts": {
+    "start": "bun run src/main.ts",
+    "setup": "bun run src/setup.ts",
+    "pair": "bun run src/pair.ts",
+    "check": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@session.js/client": "^0.0.57",
+    "@session.js/keypair": "^1.0.8",
+    "@session.js/mnemonic": "^1.0.6",
+    "@session.js/types": "^1.0.19",
+    "qrcode-terminal": "^0.12.0"
+  },
+  "devDependencies": {
+    "@types/bun": "latest",
+    "typescript": "^5.6.0"
+  }
+}
