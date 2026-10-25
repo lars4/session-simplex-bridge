@@ -112,7 +112,10 @@ function splitHostPort(s: string, defaultPort: number): { host: string; port: nu
 export function startTorHttpProxy(
   socks: SocksTarget,
   opts: { isolation: string; isReady: () => boolean },
-): Promise<{ url: string; close: () => void }> {
+): Promise<{ url: string; close: () => void; newCircuit: () => void }> {
+  // Tor puts requests with different SOCKS usernames on different circuits.
+  // Bumping this counter makes every later request use a fresh circuit.
+  let epoch = 0;
   const server = net.createServer((client) => {
     let head = Buffer.alloc(0);
     client.on("error", () => {});
@@ -154,7 +157,7 @@ export function startTorHttpProxy(
             "\r\nConnection: close\r\n\r\n";
           firstBytes = Buffer.concat([Buffer.from(rewritten, "latin1"), body]);
         }
-        const { socket, rest } = await socksConnect(socks, host, port, opts.isolation);
+        const { socket, rest } = await socksConnect(socks, host, port, `${opts.isolation}-${epoch}`);
         socket.on("error", () => client.destroy());
         client.on("close", () => socket.destroy());
         socket.on("close", () => client.destroy());
@@ -175,9 +178,29 @@ export function startTorHttpProxy(
     server.once("error", reject);
     server.listen(0, "127.0.0.1", () => {
       const addr = server.address() as net.AddressInfo;
-      resolve({ url: `http://127.0.0.1:${addr.port}`, close: () => server.close() });
+      resolve({
+        url: `http://127.0.0.1:${addr.port}`,
+        close: () => server.close(),
+        newCircuit: () => void epoch++,
+      });
     });
   });
+}
+
+/**
+ * Bun reads NO_PROXY when the process starts, and for hosts it matches, fetch() ignores
+ * the proxy option and connects directly. That would bypass Tor, and it can't be undone
+ * from inside the process. So with Tor on, the bridge refuses to start when it is set.
+ * (The background service never has it: launchd gives it a clean environment.)
+ */
+export function proxyBypassProblem(env: Record<string, string | undefined> = process.env): string | undefined {
+  const name = ["NO_PROXY", "no_proxy"].find((n) => env[n]);
+  if (!name) return undefined;
+  return (
+    `${name} is set in this environment (${env[name]!.slice(0, 40)}). Bun would then connect to matching ` +
+    `hosts directly instead of through Tor, so the bridge refuses to start. ` +
+    `Start it with: env -u NO_PROXY -u no_proxy bun run start (the background service is not affected).`
+  );
 }
 
 /**

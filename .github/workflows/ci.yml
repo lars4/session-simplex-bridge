@@ -1,0 +1,43 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Tests (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+      - name: Install dependencies
+        run: |
+          if [ -f bun.lock ]; then bun install --frozen-lockfile; else bun install; fi
+      - name: Tests
+        run: bun run test
+      - name: Shell scripts parse
+        run: |
+          bash -n install.sh
+          bash -n uninstall.sh
+
+  typecheck:
+    name: Type check
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+      - name: Install dependencies
+        run: |
+          if [ -f bun.lock ]; then bun install --frozen-lockfile; else bun install; fi
+      - run: bun run check

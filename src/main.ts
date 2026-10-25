@@ -7,7 +7,7 @@ import { getSecret } from "./secrets.ts";
 import { SimplexClient } from "./simplex.ts";
 import { Bridge } from "./bridge.ts";
 import { Tor } from "./tor.ts";
-import { startTorHttpProxy, forceFetchThroughProxy } from "./tor-proxy.ts";
+import { startTorHttpProxy, forceFetchThroughProxy, proxyBypassProblem } from "./tor-proxy.ts";
 
 function acquireLock() {
   if (fs.existsSync(paths.lock)) {
@@ -74,13 +74,21 @@ process.on("uncaughtException", (e) => {
 });
 
 let simplexSocks: string | undefined;
+let newCircuit: (() => void) | undefined;
 if (config.tor) {
+  const problem = proxyBypassProblem();
+  if (problem) {
+    log.error(problem);
+    releaseLock();
+    process.exit(0); // exit 0 so launchd doesn't restart in a loop
+  }
   const t = new Tor();
   tor = t;
   // Kill switch for the Session side: every fetch() in this process goes through
   // this proxy, which only talks to Tor. Installed before anything touches the network.
   const proxy = await startTorHttpProxy(t.socks, { isolation: "session-bridge", isReady: () => t.ready });
   forceFetchThroughProxy(proxy.url);
+  newCircuit = proxy.newCircuit;
   simplexSocks = `${t.socks.host}:${t.socks.port}`;
   t.start();
   log.info("Waiting for Tor to connect…");
@@ -102,5 +110,6 @@ simplex = new SimplexClient(dbKey, simplexSocks);
 bridge = new Bridge(simplex, session, poller, {
   isReady: () => !tor || tor.ready,
   status: () => (tor ? tor.status() : "direct (Tor turned off)"),
+  newCircuit,
 });
 bridge.start();

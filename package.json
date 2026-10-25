@@ -1,6 +1,6 @@
 {
   "name": "session-simplex-bridge",
-  "version": "1.0.0",
+  "version": "0.3.0",
   "private": true,
   "description": "Receive Session messages in SimpleX (e.g. on a hidden profile) and reply from there.",
   "type": "module",
@@ -8,6 +8,8 @@
     "start": "bun run src/main.ts",
     "setup": "bun run src/setup.ts",
     "pair": "bun run src/pair.ts",
+    "verify": "bun run src/verify.ts",
+    "test": "bun test/run.ts",
     "check": "tsc --noEmit"
   },
   "dependencies": {

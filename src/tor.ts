@@ -130,6 +130,9 @@ export class Tor {
           const line = buf.slice(0, i).trim();
           buf = buf.slice(i + 1);
           if (!line) continue;
+          // Session nodes are addressed by IP (from the node list fetched over Tor), so
+          // Tor's "only an IP address" DNS-leak warning doesn't apply. Don't flood the log.
+          if (line.includes("giving Tor only an IP address")) continue;
           const m = /Bootstrapped (\d+)%/.exec(line);
           if (m) {
             this.progress = Number(m[1]);

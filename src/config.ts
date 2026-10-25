@@ -23,6 +23,8 @@ export const config = {
   pollIntervalMs: Number(process.env.POLL_INTERVAL_MS ?? 5000),
   /** Keep retrying a failed delivery to Session for this long before giving up (ms). */
   sendGiveUpMs: Number(process.env.SEND_GIVE_UP_MS ?? 24 * 60 * 60 * 1000),
+  /** Tell you in SimpleX when Session has been unreachable this long (minutes). 0 turns it off. */
+  healthAlertMinutes: Number(process.env.HEALTH_ALERT_MINUTES ?? 30),
   /** Where secrets are kept: "keychain" (macOS default) or "file". */
   secretsBackend:
     process.env.BRIDGE_SECRETS ?? (process.platform === "darwin" ? "keychain" : "file"),

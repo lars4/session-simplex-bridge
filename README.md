@@ -2,6 +2,8 @@
 
 **Read and answer your [Session](https://getsession.org) messages from [SimpleX Chat](https://simplex.chat), with every connection running over Tor.**
 
+[![CI](https://github.com/lars4/session-simplex-bridge/actions/workflows/ci.yml/badge.svg)](https://github.com/lars4/session-simplex-bridge/actions/workflows/ci.yml)
+
 > 🧅 **Tor-only, tested and working.** Every connection the bridge makes, to Session and to SimpleX, goes through Tor. It fails closed: no direct connections, no local DNS lookups, no fallback. This has been tested on real Tor and verified at the connection level ([how to check it yourself](#verify-it-yourself)).
 
 ```mermaid
@@ -16,6 +18,7 @@ People keep writing to your Session ID. Every message shows up in one SimpleX ch
 ## Features
 
 - **🧅 Tor-only, fail-closed:** a bundled Tor, SimpleX over `.onion` relays, every Session request forced through Tor, and seed nodes certificate-pinned. If Tor is down, nothing leaves the machine. [More below](#tor-everything-goes-through-tor).
+- **Tells you when something is wrong:** if Session can't be reached for 30 minutes, the bridge says so in your SimpleX chat, and again when it works. [Details](#health-alerts).
 - **Two-way:** text, photos, files and voice messages, in both directions.
 - **Reply by quoting:** quote a forwarded message to answer that person. A ✅ reaction confirms delivery.
 - **Nothing gets lost offline:** Session keeps messages for about 14 days, SimpleX relays hold your replies, and the bridge queues everything on disk. When the Mac comes back, it catches up in order.
@@ -36,6 +39,8 @@ Early, personal-scale software: one Session account bridged to one SimpleX profi
 | Linux | Should work (see [Linux](#linux)), untested |
 
 Reports from untested platforms are very welcome. Please open an issue.
+
+The automated tests (`bun run test`) run on every push on Linux and on macOS (Apple Silicon) runners. They test the bridge logic with stand-ins for Session and SimpleX, plus the Tor kill switch. They are not a full install on those systems, so the table above stays as it is.
 
 ## Requirements
 
@@ -105,6 +110,16 @@ Are we still on for Friday?
 
 To send a text that starts with `/`, write `//`.
 
+## Health alerts
+
+The bridge checks Session every few seconds. When a check fails it retries after 3 seconds, then 6, 12, 24 and every 30 seconds, and from the second failure on it switches to a fresh Tor circuit. Most hiccups (one slow Session node, one bad circuit) fix themselves this way within a minute.
+
+If Session stays unreachable for **30 minutes**, the bridge writes to you in SimpleX with the reason. It repeats the warning every 6 hours while the problem lasts, and sends "reachable again" when it's over. Time the Mac spends asleep doesn't count. Nothing is lost while it's down: Session keeps messages for about 14 days.
+
+If the connection is down on the Mac itself, the warning waits in the SimpleX queue and arrives together with the recovery message.
+
+Change the time with `HEALTH_ALERT_MINUTES` (`0` turns the alerts off).
+
 ## Tor: everything goes through Tor
 
 This is the core of the project, not an add-on. **Tor is on by default, and the bridge has been tested and works fully over Tor:** sending, receiving, files, pairing and catching up after being offline all run through Tor.
@@ -115,7 +130,7 @@ What that means in practice:
 
 - **No IP exposure:** Session's nodes and SimpleX's relays never see your IP address.
 - **No DNS leaks:** hostnames are resolved by Tor, never by your Mac.
-- **No bypass:** library requests that don't ask for a proxy are routed through Tor anyway.
+- **No bypass:** library requests that don't ask for a proxy are routed through Tor anyway. If `NO_PROXY` is set in the environment (Bun would then skip Tor for matching hosts), the bridge refuses to start.
 - **No fake node lists:** seed-node requests are upgraded to HTTPS with pinned certificates, so a Tor exit relay can't tamper with them.
 
 | Part | How it's routed |
@@ -127,7 +142,23 @@ What that means in practice:
 
 ### Verify it yourself
 
-You don't have to take this on trust. While the bridge runs, the bridge process and `simplex-chat` should only have connections to `127.0.0.1` (the local Tor). The only process talking to the internet is `tor`, and the addresses it connects to are Tor relays, not Session or SimpleX servers.
+You don't have to take this on trust. While the bridge runs:
+
+```bash
+bun run verify
+```
+
+This looks at the real network connections of the bridge, of `simplex-chat` and of Tor, and fails if:
+
+- the bridge or `simplex-chat` has any connection to something other than this computer (they may only talk to the local Tor port),
+- anything listens on a port that other computers can reach,
+- `simplex-chat` isn't started in Tor-only mode (`--socks-mode always`).
+
+Tor itself is the only process allowed to connect outside, and the addresses it connects to are Tor relays, not Session or SimpleX servers. Finally it asks [check.torproject.org](https://check.torproject.org) through the bridge's Tor and expects "this is Tor" back (`bun run verify --offline` skips that request).
+
+This is a snapshot of the connections open at that moment. For a continuous check, use a firewall that logs outgoing connections, for example [LuLu](https://objective-see.org/products/lulu.html) or Little Snitch: only `tor` should ever show up.
+
+The same check by hand:
 
 ```bash
 for p in $(pgrep -f "src/main.ts") $(pgrep -f "simplex-chat -p"); do lsof -nP -a -p $p -iTCP; done
@@ -167,6 +198,8 @@ Read this before relying on the bridge.
 |---|---|
 | Watch the log | `tail -f ~/Library/Logs/session-simplex-bridge.log` |
 | Restart | `launchctl kickstart -k gui/$(id -u)/local.session-simplex-bridge` |
+| Check that only Tor is used | `bun run verify` |
+| Run the tests | `bun run test` |
 | Update the bridge | `git pull && ./install.sh` |
 | Update the SimpleX CLI | `UPDATE_SIMPLEX=1 ./install.sh` |
 | Pair a different SimpleX profile | `bun run pair --reset` |
@@ -182,6 +215,7 @@ Re-running `./install.sh` is always safe. It keeps your identity, pairing and da
 | `simplex-chat does not start … libcrypto` | Intel Macs build OpenSSL from source. Install the Command Line Tools with `xcode-select --install`, then run `./install.sh` again. |
 | No answer to `/status`, log ends with `Waiting for Tor to connect…` | The bridge waits for Tor before starting SimpleX. Check the log for `[tor]` warnings. Networks that block Tor need Tor bridges; run your own Tor configured with bridges and point `TOR_SOCKS` at it. |
 | No messages arrive | Send `/status`. Check that the background item is allowed under **System Settings → General → Login Items & Extensions**. |
+| Log says `NO_PROXY is set … refuses to start` | You started the bridge by hand from a shell that has `NO_PROXY`. Use `env -u NO_PROXY -u no_proxy bun run start`. The background service is not affected. |
 | The bridge chat in SimpleX was deleted | The bridge notices and creates a new pairing link. Run `bun run pair`. |
 
 ## Linux
@@ -214,6 +248,7 @@ All settings are environment variables:
 | `SIMPLEX_BOT_NAME` | `Session` | Name of the bridge chat in SimpleX |
 | `POLL_INTERVAL_MS` | `5000` | How often Session is checked |
 | `SEND_GIVE_UP_MS` | `86400000` | How long failed replies are retried |
+| `HEALTH_ALERT_MINUTES` | `30` | Warn in SimpleX when Session was unreachable this long (`0` = off) |
 
 ## How it works
 
@@ -225,6 +260,8 @@ src/
   seed-certs.ts  pinned certificates of Session's seed nodes
   simplex.ts     runs simplex-chat and talks to its local WebSocket API
   bridge.ts      forwarding, reply routing, commands, retry queues
+  health.ts      outage alerts and retry timing (pure logic, tested with a fake clock)
+  verify.ts      `bun run verify`: checks that only Tor is used
   store.ts       state on disk (atomic writes), Session.js storage adapter
   secrets.ts     Keychain / file secrets
   setup.ts       first-time setup (create or import a Session identity)
@@ -232,11 +269,13 @@ src/
 scripts/
   fetch-tor.ts      downloads and verifies the Tor Expert Bundle
   fetch-openssl.ts  provides libcrypto for simplex-chat without Homebrew
+test/               tests with stand-ins for Session and SimpleX (no network needed)
+.github/workflows/  CI: type check and tests on Linux and macOS
 ```
 
 Every incoming message is written to disk before it's forwarded, and replies are queued until Session confirms them. Session.js records which messages it has already seen, so a restart never forwards anything twice.
 
-Type-check with `bun run check`.
+Type-check with `bun run check`, run the tests with `bun run test`. See [CHANGELOG.md](CHANGELOG.md) for what changed between versions.
 
 ## License
 

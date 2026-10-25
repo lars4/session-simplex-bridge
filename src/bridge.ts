@@ -11,6 +11,7 @@ import {
   type SerializedAttachment,
 } from "./store.ts";
 import { SimplexClient, type ChatResp } from "./simplex.ts";
+import { Health, pollDelay, formatDuration, type HealthEvent } from "./health.ts";
 
 // Session's file server rejects attachments above 10 MB.
 const SESSION_MAX_FILE = 10 * 1024 * 1024;
@@ -64,13 +65,19 @@ export class Bridge {
   private pumpingSession = false;
   private lastPollOk = 0;
   private lastPollError: string | undefined;
+  private pollFailures = 0;
   private mySessionId: string;
+  private health = new Health({
+    alertAfterMs: config.healthAlertMinutes * 60_000,
+    remindEveryMs: 6 * 60 * 60_000,
+    sleepGapMs: 3 * 60_000,
+  });
 
   constructor(
     private simplex: SimplexClient,
     private session: Session,
     private poller: Poller,
-    private network: { isReady: () => boolean; status: () => string } = {
+    private network: { isReady: () => boolean; status: () => string; newCircuit?: () => void } = {
       isReady: () => true,
       status: () => "direct",
     },
@@ -85,6 +92,7 @@ export class Bridge {
     this.cleanupOldFiles();
     this.simplex.start();
     void this.pollLoop();
+    setInterval(() => this.checkHealth(), 60_000);
     setInterval(() => {
       void this.pumpToSimplex();
       void this.pumpToSession();
@@ -98,7 +106,6 @@ export class Bridge {
   // ---------------------------------------------------------------- Session side
 
   private async pollLoop() {
-    let delay = config.pollIntervalMs;
     while (!this.stopped) {
       if (!this.network.isReady()) {
         await Bun.sleep(2000);
@@ -109,15 +116,42 @@ export class Bridge {
         if (this.lastPollError) log.info("Session polling works again");
         this.lastPollOk = Date.now();
         this.lastPollError = undefined;
-        delay = config.pollIntervalMs;
+        this.pollFailures = 0;
       } catch (e) {
         const msg = errMsg(e);
         if (msg !== this.lastPollError) log.warn("Session poll failed:", msg);
         this.lastPollError = msg;
-        delay = Math.min(Math.max(delay * 2, 10_000), 120_000);
+        this.pollFailures++;
+        // The first failure is often one slow Session node. If it keeps failing, the
+        // Tor circuit may be the problem, so the next requests get a fresh one.
+        if (this.pollFailures >= 2) this.network.newCircuit?.();
       }
-      await Bun.sleep(delay);
+      await Bun.sleep(pollDelay(this.pollFailures, config.pollIntervalMs));
     }
+  }
+
+  // ---------------------------------------------------------------- Health alert
+
+  /** Runs every minute: tells you in SimpleX when Session has been unreachable for a while. */
+  private checkHealth() {
+    const down = !this.network.isReady() || this.lastPollError !== undefined;
+    const ev = this.health.tick(down, Date.now());
+    if (ev) this.notifyHealth(ev);
+  }
+
+  private notifyHealth(ev: HealthEvent) {
+    const dur = formatDuration(ev.downMs);
+    log.info(`Health: ${ev.type} (${dur})`);
+    if (ev.type === "recovered") {
+      return this.notify(`✅ Session is reachable again (it was down for about ${dur}). Nothing was lost.`);
+    }
+    const reason = !this.network.isReady() ? this.network.status() : (this.lastPollError ?? "unknown");
+    this.notify(
+      `⚠️ ${ev.type === "remind" ? "Still no" : "No"} connection to Session for about ${dur}.\n` +
+        `Reason: ${reason}\n\n` +
+        `Messages sent to you wait on Session's servers (about 14 days) and arrive once this works again. ` +
+        `If it stays like this, check the Mac's internet connection or restart the bridge.`,
+    );
   }
 
   private onSessionMessage(m: SessionMessage) {
@@ -279,8 +313,13 @@ export class Bridge {
     const owner = store.state.owner;
     const info = aci?.chatInfo;
     const ci = aci?.chatItem;
-    if (!owner || info?.type !== "direct" || info.contact?.contactId !== owner.contactId) return;
     if (ci?.chatDir?.type !== "directRcv" || ci?.content?.type !== "rcvMsgContent") return;
+    if (!owner) return log.info("SimpleX message received, but the bridge isn't paired yet");
+    if (info?.type !== "direct" || info.contact?.contactId !== owner.contactId) {
+      return log.info(
+        `Ignored a SimpleX message from another chat (${info?.type ?? "?"} ${info?.contact?.contactId ?? ""}, paired contact is ${owner.contactId})`,
+      );
+    }
     try {
       await this.onOwnerMessage(ci);
     } catch (e) {
@@ -297,8 +336,10 @@ export class Bridge {
     const hasFile = !!ci.file;
 
     if (!hasFile && text.startsWith("/") && !text.startsWith("//")) {
+      log.info(`Command from you: ${text.split(/\s+/)[0].slice(0, 20)}`);
       return this.onCommand(text, itemId);
     }
+    log.info(`Message from you in SimpleX${hasFile ? " (with file)" : ""}`);
     if (text.startsWith("//")) text = text.slice(1);
 
     // Who is this for? A quoted forwarded message wins, otherwise the current chat.
@@ -480,11 +521,12 @@ export class Bridge {
   private notify(text: string, quotedItemId?: number) {
     const owner = store.state.owner;
     if (!owner || !this.simplex.connected) {
-      log.info("Owner notice not delivered (SimpleX not ready)");
+      log.info(`Reply to you not sent (${owner ? "SimpleX not connected" : "not paired"})`);
       return;
     }
     this.simplex
       .sendToContact(owner.contactId, { text, quotedItemId })
+      .then(() => log.info("Reply sent to you in SimpleX"))
       .catch((e) => log.warn("Could not send notice:", errMsg(e)));
   }
 
@@ -601,6 +643,7 @@ export class Bridge {
           item.files.forEach((f) => safeRm(f.path));
           this.touchContact(item.to);
           this.react(item.ownerItemId, "✅");
+          log.info(`Delivered your reply to ${shortId(item.to)} on Session`);
         } catch (e) {
           const msg = errMsg(e);
           const permanent =
