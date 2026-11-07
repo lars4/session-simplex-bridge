@@ -96,7 +96,7 @@ Are we still on for Friday?
 - **Reply to someone:** quote (swipe on) one of their messages and write your answer.
 - **A message without a quote** goes to the current chat. That's the last person you quoted or picked with `/to`; at the start it's the first person who writes. Messages from anyone else carry the hint `↩︎ quote to reply`.
 - **Files:** send photos, files or voice messages as usual. Session accepts up to 10 MB.
-- **✅** on your message means it reached Session. Failed sends are retried for 24 hours, then you get a notice.
+- **✅** on your message means it reached Session. A failed send is retried after 5 s, 10 s, 20 s … then every 2 minutes, with a fresh Tor circuit from the second failure on. After 24 hours you get a notice. `/status` shows why a reply is still waiting.
 
 | Command | What it does |
 |---|---|
@@ -104,11 +104,22 @@ Are we still on for Friday?
 | `/who` | Show the current chat |
 | `/list` | All known Session contacts |
 | `/name <name> <new name>` | Rename a contact's short name |
+| `/read [name\|all]` | Tell people on Session that you read their messages ([details](#read-receipts)) |
 | `/id` | Show the bridge's Session ID |
-| `/status` | Tor state, queues, last successful Session check |
+| `/status` | Tor state, queues (with age, tries and last error of a waiting reply), last successful Session check |
 | `/help` | Help |
 
 To send a text that starts with `/`, write `//`.
+
+## Read receipts
+
+SimpleX has no read receipts, so the bridge can't see that you opened a forwarded message. Instead it tells the sender on Session "read" at the moments that show you saw it:
+
+- when you **answer** them (reply by quoting, or write in their chat),
+- when you switch to their chat with `/to <name>`,
+- when you send **`/read`** (current chat), `/read <name>` or `/read all`.
+
+Session shows this only to senders who have read receipts turned on in their own Session settings. The bridge never reports anything for group messages. If sending the receipt fails, it is kept and sent with your next reply. `READ_RECEIPTS=off` turns it off completely.
 
 ## Health alerts
 
@@ -216,6 +227,7 @@ Re-running `./install.sh` is always safe. It keeps your identity, pairing and da
 | No answer to `/status`, log ends with `Waiting for Tor to connect…` | The bridge waits for Tor before starting SimpleX. Check the log for `[tor]` warnings. Networks that block Tor need Tor bridges; run your own Tor configured with bridges and point `TOR_SOCKS` at it. |
 | No messages arrive | Send `/status`. Check that the background item is allowed under **System Settings → General → Login Items & Extensions**. |
 | Log says `NO_PROXY is set … refuses to start` | You started the bridge by hand from a shell that has `NO_PROXY`. Use `env -u NO_PROXY -u no_proxy bun run start`. The background service is not affected. |
+| `/status` says `Waiting to send to Session: 1` for a long time | The line includes the last error and when the next try is. Replies are retried every 5 s to 2 min, so a wait of more than a few minutes means Session or Tor isn't answering. Check `tail -f ~/Library/Logs/session-simplex-bridge.log` (look for `Sending to Session failed`) and run `bun run verify`. |
 | The bridge chat in SimpleX was deleted | The bridge notices and creates a new pairing link. Run `bun run pair`. |
 
 ## Linux
@@ -248,6 +260,8 @@ All settings are environment variables:
 | `SIMPLEX_BOT_NAME` | `Session` | Name of the bridge chat in SimpleX |
 | `POLL_INTERVAL_MS` | `5000` | How often Session is checked |
 | `SEND_GIVE_UP_MS` | `86400000` | How long failed replies are retried |
+| `READ_RECEIPTS` | `on` | `off` = never tell Session senders that you read their messages |
+| `SEND_TIMEOUT_MS` | `180000` | Give up one attempt to send to Session after this long (it is retried) |
 | `HEALTH_ALERT_MINUTES` | `30` | Warn in SimpleX when Session was unreachable this long (`0` = off) |
 
 ## How it works

@@ -23,6 +23,10 @@ export const config = {
   pollIntervalMs: Number(process.env.POLL_INTERVAL_MS ?? 5000),
   /** Keep retrying a failed delivery to Session for this long before giving up (ms). */
   sendGiveUpMs: Number(process.env.SEND_GIVE_UP_MS ?? 24 * 60 * 60 * 1000),
+  /** Give up on one attempt to send to Session after this long (ms); it is retried afterwards. */
+  sendTimeoutMs: Number(process.env.SEND_TIMEOUT_MS ?? 3 * 60 * 1000),
+  /** Tell the sender in Session that you read their messages when you answer them (or send /read). */
+  readReceipts: (process.env.READ_RECEIPTS ?? "on").toLowerCase() !== "off",
   /** Tell you in SimpleX when Session has been unreachable this long (minutes). 0 turns it off. */
   healthAlertMinutes: Number(process.env.HEALTH_ALERT_MINUTES ?? 30),
   /** Where secrets are kept: "keychain" (macOS default) or "file". */

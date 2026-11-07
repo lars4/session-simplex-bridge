@@ -4,7 +4,7 @@ import { FakeSession, FakePoller } from "./fakes.ts";
 
 // A short poll interval so the retry test below doesn't take long.
 process.env.POLL_INTERVAL_MS = "100";
-const { ensureDirs, paths } = await import("../src/config.ts");
+const { ensureDirs, paths, config } = await import("../src/config.ts");
 const { store } = await import("../src/store.ts");
 const { Bridge } = await import("../src/bridge.ts");
 const { Health } = await import("../src/health.ts");
@@ -120,6 +120,50 @@ ok((fs.statSync(paths.state).mode & 0o777) === 0o600, "state file is private (60
 // 11. /status shows the network line
 owner(950, "/status"); await tick();
 ok(sent.at(-1).text.includes("Network: Tor ✅ (test)") && sent.at(-1).text.includes("Last successful Session check"), "/status answers with network info: " + JSON.stringify(sent.at(-1).text));
+
+// 11b. read receipts: told "read" when you answer, switch with /to, or send /read
+const reads = (id: string) => session.reads.filter((r: any) => r.from === id);
+ok(reads(ANNA).some((r: any) => r.messagesTimestamps.includes(1000)), "answering Anna told her Session that her message was read");
+ok(reads(BEN).some((r: any) => r.messagesTimestamps.includes(2000)), "answering Ben told his Session that his message was read");
+ok(Object.keys(store.state.unread).length === 0, "nothing left unread after answering");
+session.emit("message", { id: "m3", type: "private", from: ANNA, author: { displayName: "Anna Müller" }, text: "ping", attachments: [], timestamp: 3000 });
+session.emit("message", { id: "m3g", type: "group", groupId: "g1", from: BEN, author: { displayName: "Ben" }, text: "group chat", attachments: [], timestamp: 3100 });
+await tick();
+ok(store.state.unread[ANNA]?.join() === "3000" && !store.state.unread[BEN], "new message is unread (group messages are not tracked)");
+const readsBefore = reads(ANNA).length;
+owner(960, "/read"); await tick(); await tick();
+ok(reads(ANNA).length === readsBefore + 1 && reads(ANNA).at(-1).messagesTimestamps.join() === "3000", "/read tells the current chat's sender");
+ok(sent.at(-1).text.startsWith("Told "), "/read confirms: " + JSON.stringify(sent.at(-1).text));
+owner(961, "/read"); await tick();
+ok(sent.at(-1).text === "Nothing unread to report.", "/read with nothing unread says so");
+config.readReceipts = false;
+session.emit("message", { id: "m4", type: "private", from: ANNA, author: { displayName: "Anna Müller" }, text: "again", attachments: [], timestamp: 3200 });
+await tick();
+owner(962, "answer without receipt"); await tick(); await tick();
+ok(reads(ANNA).length === readsBefore + 1, "READ_RECEIPTS=off sends no receipts");
+config.readReceipts = true;
+session.failNext = 1; // the receipt itself fails once: it must stay queued
+owner(963, "/read"); await tick(); await tick();
+ok(sent.at(-1).text.includes("Couldn't send the read receipt") && store.state.unread[ANNA]?.length, "failed receipt is reported and kept for later");
+owner(964, "/read"); await tick(); await tick();
+ok(reads(ANNA).at(-1).messagesTimestamps.includes(3200) && !store.state.unread[ANNA], "kept receipt is sent on the next try");
+
+// 11c. a send that never answers must not block the queue
+config.sendTimeoutMs = 300;
+session.hang = true;
+owner(970, "this one hangs"); await sleep(450);
+const stuck = store.state.toSession[0];
+ok(stuck && stuck.tries === 1 && /timed out/.test(stuck.lastError ?? ""), "hung send times out and is queued for retry: " + JSON.stringify(stuck?.lastError));
+owner(971, "/status"); await tick();
+ok(/Waiting to send to Session: 1 \(oldest .*1 failed try, next try in \d+s, last error: sending to Session timed out\)/.test(sent.at(-1).text), "/status shows age, tries, next try and the error: " + JSON.stringify(sent.at(-1).text.split("\n")[3]));
+session.hang = false;
+const circuitsBefore = circuits;
+session.failNext = 1;
+store.state.toSession[0].nextAt = 0; await bridge.pumpToSession(); // 2nd failure
+ok(store.state.toSession[0]?.tries === 2 && circuits === circuitsBefore + 1, "second failure asks for a fresh Tor circuit");
+store.state.toSession[0].nextAt = 0; await bridge.pumpToSession(); await tick();
+ok(store.state.toSession.length === 0 && session.sent.at(-1).text === "this one hangs", "delivered once Session answers");
+config.sendTimeoutMs = 180000;
 
 // 12. health alert: Session unreachable for a while → one warning, then "reachable again"
 bridge.health = new Health({ alertAfterMs: 50, remindEveryMs: 60_000, sleepGapMs: 60_000 });

@@ -208,12 +208,21 @@ export function proxyBypassProblem(env: Record<string, string | undefined> = pro
  * request a library makes without passing a proxy. This is the kill switch for
  * the Session side.
  */
-export function forceFetchThroughProxy(proxyUrl: string) {
+export function forceFetchThroughProxy(
+  proxyUrl: string,
+  timeouts: { rpcMs: number; otherMs: number } = { rpcMs: 90_000, otherMs: 5 * 60_000 },
+) {
   const realFetch = globalThis.fetch;
   const guarded = ((input: string | URL | Request, init?: RequestInit) => {
     const upgraded = upgradeSeedRequest(input, init);
-    if (upgraded) return realFetch(upgraded.url, { ...upgraded.init, proxy: proxyUrl } as RequestInit);
-    return realFetch(input, { ...(init ?? {}), proxy: proxyUrl } as RequestInit);
+    const url = upgraded?.url ?? (input instanceof Request ? input.url : String(input));
+    const base = upgraded?.init ?? init ?? {};
+    // No request may hang forever: a stalled request over Tor would otherwise block
+    // polling or sending. Small RPC calls get a short limit, file transfers a long one.
+    const limit = /\/(storage_rpc|json_rpc)\b/.test(url) ? timeouts.rpcMs : timeouts.otherMs;
+    const timeout = AbortSignal.timeout(limit);
+    const signal = base.signal ? AbortSignal.any([base.signal, timeout]) : timeout;
+    return realFetch(upgraded?.url ?? input, { ...base, signal, proxy: proxyUrl } as RequestInit);
   }) as typeof fetch;
   Object.assign(guarded, realFetch);
   globalThis.fetch = guarded;

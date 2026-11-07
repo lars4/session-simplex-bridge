@@ -1,6 +1,6 @@
 {
   "name": "session-simplex-bridge",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "private": true,
   "description": "Receive Session messages in SimpleX (e.g. on a hidden profile) and reply from there.",
   "type": "module",

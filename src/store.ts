@@ -58,6 +58,8 @@ export type OutboundItem = {
   createdAt: number;
   tries: number;
   nextAt: number;
+  /** Why the last attempt failed (shown by /status). */
+  lastError?: string;
 };
 
 /** A file the owner sent in SimpleX that is still being downloaded by the CLI. */
@@ -86,6 +88,8 @@ export type State = {
   toSession: OutboundItem[];
   pendingOwnerFiles: Record<string, PendingOwnerFile>;
   sentFiles: Record<string, string>;
+  /** Timestamps of forwarded messages per Session ID that haven't been reported as read yet. */
+  unread: Record<string, number[]>;
 };
 
 const MAX_REFS = 3000;
@@ -101,6 +105,7 @@ function emptyState(): State {
     toSession: [],
     pendingOwnerFiles: {},
     sentFiles: {},
+    unread: {},
   };
 }
 

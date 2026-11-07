@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.3.1
+
+- **Replies to Session no longer get stuck:** one attempt is cut off after 3 minutes (a stalled request over Tor used to block the whole reply queue), every request has a time limit, retries are quick (5 s, 10 s, 20 s … then every 2 minutes instead of up to 10 minutes) and use a fresh Tor circuit from the second failure on. The reason for every failed attempt is logged.
+- **`/status` explains a waiting reply:** age of the oldest one, number of failed tries, time of the next try and the last error.
+- **Read receipts for Session:** the sender is told you read their messages when you answer them, switch to their chat with `/to`, or send the new `/read [name|all]` command. SimpleX can't report that you opened a message, so this is as close as it gets. `READ_RECEIPTS=off` turns it off.
+- **Fix (type check):** added `DOM.AsyncIterable` to the TypeScript libs.
+
 ## 0.3.0
 
 - **Health alerts:** if Session can't be reached for 30 minutes, the bridge tells you in SimpleX (with the reason), reminds you every 6 hours, and sends "reachable again" afterwards. Time the Mac spends asleep isn't counted. `HEALTH_ALERT_MINUTES` changes the time, `0` turns it off.

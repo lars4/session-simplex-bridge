@@ -13,8 +13,9 @@ ok(proxyBypassProblem({ NO_PROXY: "127.0.0.1" })?.includes("refuses to start") &
 // A "destination" web server on localhost. If a request ever reaches it directly,
 // the kill switch has a hole.
 let destHits = 0;
-const dest = http.createServer((_req, res) => {
+const dest = http.createServer((req, res) => {
   destHits++;
+  if (req.url?.includes("hang")) return; // never answers
   res.end("hello from destination");
 });
 await new Promise<void>((r) => dest.listen(0, "127.0.0.1", r));
@@ -124,6 +125,30 @@ const realFetch = globalThis.fetch;
     outcome = "error";
   }
   ok(requests.length === before && destHits === 0, "Tor not ready → nothing is sent (" + outcome + ")");
+  proxy.close();
+  globalThis.fetch = realFetch;
+}
+
+// 5. A request that never answers is cut off (short limit for RPC calls, long one for the rest).
+{
+  const proxy = await startTorHttpProxy({ host: "127.0.0.1", port: socksPort }, { isolation: "slow", isReady: () => true });
+  forceFetchThroughProxy(proxy.url, { rpcMs: 300, otherMs: 1200 });
+  const timeIt = async (url: string) => {
+    const t0 = Date.now();
+    let failed = false;
+    try {
+      await fetch(url);
+    } catch {
+      failed = true;
+    }
+    return { failed, ms: Date.now() - t0 };
+  };
+  const rpc = await timeIt("http://some-site.example/storage_rpc/v1/hang");
+  ok(rpc.failed && rpc.ms >= 250 && rpc.ms < 1000, `stalled RPC request is aborted after the short limit (${rpc.ms} ms)`);
+  const other = await timeIt("http://some-site.example/file/hang");
+  ok(other.failed && other.ms >= 1100 && other.ms < 2500, `stalled file request is aborted after the long limit (${other.ms} ms)`);
+  const fine = await fetch("http://some-site.example/storage_rpc/v1/ok");
+  ok((await fine.text()) === "hello from destination", "normal requests are not affected");
   proxy.close();
   globalThis.fetch = realFetch;
 }

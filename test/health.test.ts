@@ -1,4 +1,4 @@
-import { Health, pollDelay, formatDuration } from "../src/health.ts";
+import { Health, pollDelay, sendDelay, formatDuration } from "../src/health.ts";
 import { ok, done } from "./util.ts";
 
 const MIN = 60_000;
@@ -75,5 +75,6 @@ const mk = () => new Health({ alertAfterMs: 30 * MIN, remindEveryMs: 6 * 60 * MI
 ok(pollDelay(0, 5000) === 5000, "normal interval when polling works");
 ok([1, 2, 3, 4, 5, 6, 20].map((n) => pollDelay(n, 5000)).join() === "3000,6000,12000,24000,30000,30000,30000", "retry backoff 3s…30s");
 
+ok([1, 2, 3, 4, 5, 6, 30].map(sendDelay).join() === "5000,10000,20000,40000,80000,120000,120000", "reply retry backoff 5s…2 min");
 ok(formatDuration(31 * MIN) === "31 min" && formatDuration(180 * MIN) === "3 h" && formatDuration(1000) === "1 min", "durations read well");
 done();

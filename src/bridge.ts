@@ -11,7 +11,7 @@ import {
   type SerializedAttachment,
 } from "./store.ts";
 import { SimplexClient, type ChatResp } from "./simplex.ts";
-import { Health, pollDelay, formatDuration, type HealthEvent } from "./health.ts";
+import { Health, pollDelay, sendDelay, formatDuration, type HealthEvent } from "./health.ts";
 
 // Session's file server rejects attachments above 10 MB.
 const SESSION_MAX_FILE = 10 * 1024 * 1024;
@@ -52,6 +52,7 @@ const HELP = [
   "/list – Session contacts the bridge knows",
   "/name <name> <new name> – rename a contact",
   "/id – the Session ID people can write to",
+  "/read [name|all] – tell people on Session that you read their messages",
   "/status – queue and connection status",
   "/help – this text",
   "",
@@ -67,6 +68,7 @@ export class Bridge {
   private lastPollError: string | undefined;
   private pollFailures = 0;
   private mySessionId: string;
+  private markingRead = new Set<string>();
   private health = new Health({
     alertAfterMs: config.healthAlertMinutes * 60_000,
     remindEveryMs: 6 * 60 * 60_000,
@@ -160,6 +162,7 @@ export class Bridge {
     const newContact = !store.state.contacts[m.from];
     this.touchContact(m.from, m.author?.displayName);
     if (!store.state.active && !groupId) store.state.active = m.from;
+    if (!groupId) this.trackUnread(m.from, m.timestamp);
 
     const item: InboundItem = {
       hash: m.id,
@@ -181,6 +184,43 @@ export class Bridge {
         `${item.attachments.length ? `, ${item.attachments.length} attachment(s)` : ""}`,
     );
     void this.pumpToSimplex();
+  }
+
+  // ---------------------------------------------------------------- read receipts
+  // SimpleX can't tell the bridge when you open a message (it has no read receipts), so the
+  // Session sender is told "read" at moments that do show you saw it: when you answer them,
+  // switch to their chat with /to, or send /read.
+
+  private trackUnread(sessionId: string, timestamp: number) {
+    const list = (store.state.unread[sessionId] ??= []);
+    if (!list.includes(timestamp)) list.push(timestamp);
+    if (list.length > 100) list.splice(0, list.length - 100);
+  }
+
+  /** Returns true when the sender was told (or there was nothing to tell). */
+  private async markRead(sessionId: string): Promise<boolean> {
+    if (!config.readReceipts) return true;
+    const stamps = [...(store.state.unread[sessionId] ?? [])];
+    if (!stamps.length || this.markingRead.has(sessionId)) return true;
+    this.markingRead.add(sessionId);
+    try {
+      await withTimeout(
+        Promise.resolve(this.session.markMessagesAsRead({ from: sessionId, messagesTimestamps: stamps })),
+        config.sendTimeoutMs,
+        "sending the read receipt timed out",
+      );
+      const rest = (store.state.unread[sessionId] ?? []).filter((t) => !stamps.includes(t));
+      if (rest.length) store.state.unread[sessionId] = rest;
+      else delete store.state.unread[sessionId];
+      store.save();
+      log.info(`Read receipt sent to ${shortId(sessionId)} (${stamps.length} message(s))`);
+      return true;
+    } catch (e) {
+      log.warn("Read receipt failed, will be sent with your next reply:", errMsg(e));
+      return false;
+    } finally {
+      this.markingRead.delete(sessionId);
+    }
   }
 
   private touchContact(sessionId: string, displayName?: string) {
@@ -361,6 +401,7 @@ export class Bridge {
         itemId,
       );
     }
+    void this.markRead(to);
 
     if (hasFile) {
       const fileId: number = ci.file.fileId;
@@ -430,7 +471,7 @@ export class Bridge {
 
   // ---------------------------------------------------------------- commands
 
-  private onCommand(text: string, itemId: number) {
+  private async onCommand(text: string, itemId: number) {
     const [cmdRaw, ...rest] = text.split(/\s+/);
     const cmd = cmdRaw.toLowerCase();
     switch (cmd) {
@@ -455,10 +496,29 @@ export class Bridge {
         const id = this.resolveContact(target);
         if (!id) return this.notify(`No contact matches "${target}". See /list, or use a full Session ID.`);
         this.setActive(id);
+        void this.markRead(id);
         const body = text.slice(cmdRaw.length).trimStart().slice(target.length).trim();
         if (body) this.enqueueToSession({ ownerItemId: itemId, to: id, text: body, files: [] });
         else this.notify(`Current chat: ${this.label(id)}`);
         return;
+      }
+      case "/read": {
+        if (!config.readReceipts) return this.notify("Read receipts are turned off (READ_RECEIPTS=off).");
+        const arg = rest[0];
+        let ids: string[] = [];
+        if (!arg) ids = store.state.active ? [store.state.active] : [];
+        else if (arg === "all") ids = Object.keys(store.state.unread);
+        else {
+          const id = this.resolveContact(arg);
+          if (!id) return this.notify(`No contact matches "${arg}". See /list.`);
+          ids = [id];
+        }
+        const pending = ids.filter((id) => store.state.unread[id]?.length);
+        if (!pending.length) return this.notify("Nothing unread to report.");
+        const results = await Promise.all(pending.map((id) => this.markRead(id)));
+        const told = pending.filter((_, i) => results[i]).map((id) => this.label(id));
+        if (told.length === pending.length) return this.notify(`Told ${told.join(", ")} that you read their messages.`);
+        return this.notify(`⚠️ Couldn't send the read receipt${told.length ? ` to everyone (sent to ${told.join(", ")})` : ""}. It will be retried with your next reply.`);
       }
       case "/name": {
         const [who, ...nameParts] = rest;
@@ -481,7 +541,7 @@ export class Bridge {
             `Network: ${this.network.status()}`,
             `Last successful Session check: ${poll}${this.lastPollError ? ` (last error: ${this.lastPollError})` : ""}`,
             `Waiting to forward here: ${s.toSimplex.length}`,
-            `Waiting to send to Session: ${s.toSession.length}`,
+            this.queueLine(),
             `Current chat: ${s.active ? this.label(s.active) : "none"}`,
           ].join("\n"),
         );
@@ -489,6 +549,19 @@ export class Bridge {
       default:
         return this.notify(`Unknown command ${cmd}. Send /help, or start with // to send a literal "/".`);
     }
+  }
+
+  private queueLine(): string {
+    const q = store.state.toSession;
+    if (!q.length) return "Waiting to send to Session: 0";
+    const o = q[0];
+    const now = Date.now();
+    const next = o.nextAt > now ? `next try in ${Math.round((o.nextAt - now) / 1000)}s` : "trying now";
+    return (
+      `Waiting to send to Session: ${q.length} (oldest ${ago(now - o.createdAt)}, ` +
+      `${o.tries} failed ${o.tries === 1 ? "try" : "tries"}, ${next}` +
+      `${o.lastError ? `, last error: ${o.lastError}` : ""})`
+    );
   }
 
   private resolveContact(q: string): string | undefined {
@@ -638,7 +711,8 @@ export class Bridge {
         if (this.stopped) break;
         if (item.nextAt > now) continue;
         try {
-          await this.sendToSession(item);
+          // A stalled request over Tor must not block the queue forever.
+          await withTimeout(this.sendToSession(item), config.sendTimeoutMs, "sending to Session timed out");
           this.removeOutbound(item);
           item.files.forEach((f) => safeRm(f.path));
           this.touchContact(item.to);
@@ -650,14 +724,18 @@ export class Bridge {
             /validation/i.test((e as Error)?.name ?? "") ||
             /invalid session id|must be a hex|attachment size|must be instances of file/i.test(msg);
           item.tries++;
+          item.lastError = msg.slice(0, 200);
           if (permanent || now - item.createdAt > config.sendGiveUpMs) {
             log.warn("Giving up sending to Session:", msg);
             this.removeOutbound(item);
             item.files.forEach((f) => safeRm(f.path));
             this.notify(`⚠️ Not delivered to ${this.label(item.to)}: ${msg}`, item.ownerItemId);
           } else {
-            item.nextAt = now + Math.min(30_000 * 2 ** (item.tries - 1), 10 * 60_000);
-            if (item.tries === 1) log.warn("Sending to Session failed, will retry:", msg);
+            const wait = sendDelay(item.tries);
+            item.nextAt = Date.now() + wait;
+            log.warn(`Sending to Session failed (try ${item.tries}), retrying in ${Math.round(wait / 1000)}s: ${msg}`);
+            // Repeated failures: use a fresh Tor circuit for the next attempt.
+            if (item.tries >= 2) this.network.newCircuit?.();
           }
           store.save();
         }
@@ -795,4 +873,21 @@ function guessType(fileName: string, msgType: string) {
   if (msgType === "voice") return "audio/mp4";
   if (msgType === "video") return "video/mp4";
   return "application/octet-stream";
+}
+
+function ago(ms: number): string {
+  const s = Math.round(ms / 1000);
+  if (s < 90) return `${s}s`;
+  return formatDuration(ms);
+}
+
+/** Rejects if `p` takes longer than `ms`. (A late result of `p` is ignored.) */
+function withTimeout<T>(p: Promise<T>, ms: number, what: string): Promise<T> {
+  let timer: ReturnType<typeof setTimeout>;
+  return Promise.race([
+    p,
+    new Promise<never>((_, reject) => {
+      timer = setTimeout(() => reject(new Error(what)), ms);
+    }),
+  ]).finally(() => clearTimeout(timer));
 }

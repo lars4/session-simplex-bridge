@@ -13,7 +13,9 @@ export class FakePoller {
 export class FakeSession {
   handlers: Record<string, ((m: unknown) => void)[]> = {};
   sent: any[] = [];
+  reads: { from: string; messagesTimestamps: number[] }[] = [];
   failNext = 0;
+  hang = false;
   getSessionID() {
     return "05" + "a".repeat(64);
   }
@@ -26,7 +28,15 @@ export class FakeSession {
   async getFile(a: { name?: string }) {
     return new File([new Uint8Array([1, 2, 3])], a.name ?? "x.bin", { type: "application/octet-stream" });
   }
+  async markMessagesAsRead(args: { from: string; messagesTimestamps: number[] }) {
+    if (this.failNext > 0) {
+      this.failNext--;
+      throw new Error("network down");
+    }
+    this.reads.push(args);
+  }
   async sendMessage(args: unknown) {
+    if (this.hang) return new Promise<never>(() => {}); // a request that never answers
     if (this.failNext > 0) {
       this.failNext--;
       throw new Error("network down");

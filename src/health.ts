@@ -71,6 +71,14 @@ export function pollDelay(consecutiveFailures: number, normalMs: number): number
   return Math.min(3000 * 2 ** (consecutiveFailures - 1), 30_000);
 }
 
+/**
+ * How long to wait before trying to send a reply to Session again: 5s, 10s, 20s, 40s, 80s,
+ * then every 2 minutes. (Before: 30s up to 10 minutes, which felt like "stuck".)
+ */
+export function sendDelay(tries: number): number {
+  return Math.min(5000 * 2 ** Math.max(0, tries - 1), 120_000);
+}
+
 export function formatDuration(ms: number): string {
   const min = Math.max(1, Math.round(ms / 60_000));
   if (min < 90) return `${min} min`;
